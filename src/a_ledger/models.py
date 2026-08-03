@@ -33,6 +33,11 @@ class LotEventKind(str, Enum):
     REVERSAL = "REVERSAL"
 
 
+class LotOperation(str, Enum):
+    OPEN = "OPEN"
+    CLOSE = "CLOSE"
+
+
 @dataclass(frozen=True, slots=True)
 class Money:
     minor: int

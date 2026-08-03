@@ -14,6 +14,7 @@ from .models import (
     AccountCategory,
     LotAllocation,
     LotEventKind,
+    LotOperation,
     OpenLot,
     PostResult,
     PostingDraft,
@@ -136,20 +137,30 @@ class Ledger:
         draft: TransactionDraft,
         *,
         lot_allocations: Mapping[int, Sequence[LotAllocation]] | None = None,
+        lot_operations: Mapping[int, LotOperation | str] | None = None,
     ) -> PostResult:
         with self._savepoint():
-            return self._post(draft, lot_allocations=lot_allocations or {})
+            return self._post(
+                draft,
+                lot_allocations=lot_allocations or {},
+                lot_operations=lot_operations or {},
+            )
 
     def _post(
         self,
         draft: TransactionDraft,
         *,
         lot_allocations: Mapping[int, Sequence[LotAllocation]],
+        lot_operations: Mapping[int, LotOperation | str] | None = None,
         reverses_transaction_id: str | None = None,
         replacement_for_transaction_id: str | None = None,
         lot_event_overrides: Mapping[int, Sequence[tuple[str, int, int, str]]] | None = None,
     ) -> PostResult:
         self._validate_draft(draft)
+        normalized_operations = {
+            index: LotOperation(operation)
+            for index, operation in (lot_operations or {}).items()
+        }
         allocations_payload = {
             str(index): [asdict(item) for item in allocations]
             for index, allocations in sorted(lot_allocations.items())
@@ -157,6 +168,10 @@ class Ledger:
         payload = {
             "draft": asdict(draft),
             "lot_allocations": allocations_payload,
+            "lot_operations": {
+                str(index): operation.value
+                for index, operation in sorted(normalized_operations.items())
+            },
             "reverses_transaction_id": reverses_transaction_id,
             "replacement_for_transaction_id": replacement_for_transaction_id,
         }
@@ -222,6 +237,23 @@ class Ledger:
             if overrides is not None:
                 self._write_override_lot_events(
                     draft.portfolio_id, transaction_id, posting_id, overrides
+                )
+            elif normalized_operations.get(index) == LotOperation.OPEN:
+                if index in lot_allocations:
+                    raise LedgerError("opening quantity postings cannot consume lot allocations")
+                if posting.quantity_delta == 0:
+                    raise LedgerError("lot OPEN requires a nonzero posting quantity")
+                self._acquire_lot(draft, posting, transaction_id, posting_id)
+            elif normalized_operations.get(index) == LotOperation.CLOSE:
+                if posting.quantity_delta == 0:
+                    raise LedgerError("lot CLOSE requires a nonzero posting quantity")
+                self._close_lots(
+                    draft,
+                    posting,
+                    transaction_id,
+                    posting_id,
+                    lot_allocations.get(index),
+                    required_lot_sign=-1 if posting.quantity_delta > 0 else 1,
                 )
             elif posting.quantity_delta > 0:
                 if index in lot_allocations:
@@ -335,14 +367,39 @@ class Ledger:
         posting_id: str,
         explicit: Sequence[LotAllocation] | None,
     ) -> None:
+        self._close_lots(
+            draft,
+            posting,
+            transaction_id,
+            posting_id,
+            explicit,
+            required_lot_sign=1,
+        )
+
+    def _close_lots(
+        self,
+        draft: TransactionDraft,
+        posting: PostingDraft,
+        transaction_id: str,
+        posting_id: str,
+        explicit: Sequence[LotAllocation] | None,
+        *,
+        required_lot_sign: int,
+    ) -> None:
         requested = abs(posting.quantity_delta)
-        open_lots = self.open_lots(posting.account_id, posting.instrument_code or "")
+        open_lots = [
+            lot
+            for lot in self.open_signed_lots(
+                posting.account_id, posting.instrument_code or ""
+            )
+            if (1 if lot.quantity > 0 else -1) == required_lot_sign
+        ]
         by_id = {lot.id: lot for lot in open_lots}
         if explicit is None:
             allocations: list[LotAllocation] = []
             remaining = requested
             for lot in open_lots:
-                used = min(lot.quantity, remaining)
+                used = min(abs(lot.quantity), remaining)
                 if used:
                     allocations.append(LotAllocation(lot.id, used))
                     remaining -= used
@@ -361,18 +418,26 @@ class Ledger:
             seen.add(allocation.lot_id)
             lot = by_id.get(allocation.lot_id)
             if lot is None:
-                raise LedgerError("explicit lot is unavailable or belongs to another account/instrument")
+                raise LedgerError(
+                    "explicit lot is unavailable, not opposite-side, or belongs "
+                    "to another account/instrument"
+                )
             quantity = _integer(allocation.quantity, "lot allocation quantity")
-            if quantity <= 0 or quantity > lot.quantity:
+            if quantity <= 0 or quantity > abs(lot.quantity):
                 raise LedgerError("lot allocation exceeds available quantity")
-            cost = lot.cost_minor if quantity == lot.quantity else lot.cost_minor * quantity // lot.quantity
+            available = abs(lot.quantity)
+            cost = (
+                lot.cost_minor
+                if quantity == available
+                else lot.cost_minor * quantity // available
+            )
             self._insert_lot_event(
                 draft.portfolio_id,
                 transaction_id,
                 posting_id,
                 lot.id,
                 LotEventKind.CONSUME,
-                -quantity,
+                -required_lot_sign * quantity,
                 -cost,
             )
 
@@ -501,6 +566,7 @@ class Ledger:
             return self._post(
                 draft,
                 lot_allocations={},
+                lot_operations={},
                 reverses_transaction_id=transaction_id,
                 lot_event_overrides=overrides,
             )
@@ -523,6 +589,7 @@ class Ledger:
             replaced = self._post(
                 replacement,
                 lot_allocations={},
+                lot_operations={},
                 replacement_for_transaction_id=transaction_id,
             )
             return reversal, replaced
@@ -535,6 +602,15 @@ class Ledger:
         return int(row[0])
 
     def open_lots(self, account_id: str, instrument_code: str) -> list[OpenLot]:
+        return [
+            lot
+            for lot in self.open_signed_lots(account_id, instrument_code)
+            if lot.quantity > 0
+        ]
+
+    def open_signed_lots(
+        self, account_id: str, instrument_code: str
+    ) -> list[OpenLot]:
         rows = self.connection.execute(
             """SELECT l.id, l.portfolio_id, l.account_id, l.instrument_code,
                       l.acquired_date, l.source_transaction_id,
@@ -544,7 +620,7 @@ class Ledger:
                JOIN ledger_lot_events e ON e.lot_id = l.id
                WHERE l.account_id=? AND l.instrument_code=?
                GROUP BY l.id
-               HAVING sum(e.quantity_delta) > 0
+               HAVING sum(e.quantity_delta) != 0
                ORDER BY l.acquired_date, l.created_at, l.id""",
             (account_id, instrument_code),
         ).fetchall()

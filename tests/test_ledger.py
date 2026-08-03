@@ -11,6 +11,7 @@ from a_ledger import (
     Ledger,
     LedgerError,
     LotAllocation,
+    LotOperation,
     Money,
     PostingDraft,
     Price,
@@ -280,6 +281,58 @@ def test_fifo_and_explicit_lot_consumption(connection):
     }
     assert "positions" not in tables
     assert "balances" not in tables
+
+
+def test_explicit_lot_operations_support_short_open_and_fifo_close(connection):
+    sell_open = sell_draft(
+        key="option-sell-open",
+        quantity=2,
+        proceeds_minor=1_000,
+        instrument="10000001.SH",
+    )
+    begin(connection)
+    opened = Ledger(connection).post(
+        sell_open,
+        lot_operations={0: LotOperation.OPEN},
+    )
+    connection.commit()
+
+    signed = Ledger(connection).open_signed_lots("security-1", "10000001.SH")
+    assert [(lot.quantity, lot.cost_minor) for lot in signed] == [(-2, 1_000)]
+    assert Ledger(connection).open_lots("security-1", "10000001.SH") == []
+
+    buy_close = buy_draft(
+        key="option-buy-close",
+        quantity=1,
+        cost_minor=400,
+        instrument="10000001.SH",
+    )
+    begin(connection)
+    Ledger(connection).post(
+        buy_close,
+        lot_operations={0: LotOperation.CLOSE},
+    )
+    connection.commit()
+
+    signed = Ledger(connection).open_signed_lots("security-1", "10000001.SH")
+    assert [(lot.source_transaction_id, lot.quantity, lot.cost_minor) for lot in signed] == [
+        (opened.transaction_id, -1, 500)
+    ]
+
+
+def test_explicit_close_cannot_consume_a_lot_on_the_same_side(connection):
+    post_committed(
+        connection,
+        buy_draft(key="long-open", quantity=10, cost_minor=1_000),
+    )
+    another_buy = buy_draft(key="invalid-close", quantity=5, cost_minor=500)
+    begin(connection)
+    with pytest.raises(LedgerError, match="available open lots"):
+        Ledger(connection).post(
+            another_buy,
+            lot_operations={0: LotOperation.CLOSE},
+        )
+    connection.rollback()
 
 
 def test_amount_and_quantity_reservations_affect_availability(connection):

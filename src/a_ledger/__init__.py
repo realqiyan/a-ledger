@@ -3,6 +3,7 @@ from .ledger import Ledger
 from .models import (
     AccountCategory,
     LotAllocation,
+    LotOperation,
     LotEventKind,
     Money,
     OpenLot,
@@ -20,6 +21,7 @@ __all__ = [
     "Ledger",
     "LedgerError",
     "LotAllocation",
+    "LotOperation",
     "LotEventKind",
     "Money",
     "OpenLot",
