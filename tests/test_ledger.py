@@ -335,6 +335,38 @@ def test_explicit_close_cannot_consume_a_lot_on_the_same_side(connection):
     connection.rollback()
 
 
+def test_reversing_short_close_restores_the_signed_lot(connection):
+    begin(connection)
+    ledger = Ledger(connection)
+    ledger.post(
+        sell_draft(
+            key="short-open",
+            quantity=2,
+            proceeds_minor=1_000,
+            instrument="10000001.SH",
+        ),
+        lot_operations={0: LotOperation.OPEN},
+    )
+    closed = ledger.post(
+        buy_draft(
+            key="short-close",
+            quantity=1,
+            cost_minor=400,
+            instrument="10000001.SH",
+        ),
+        lot_operations={0: LotOperation.CLOSE},
+    )
+    ledger.reverse(
+        closed.transaction_id,
+        source_namespace="test-correction",
+        idempotency_key="reverse-short-close",
+    )
+    connection.commit()
+
+    lots = ledger.open_signed_lots("security-1", "10000001.SH")
+    assert [(lot.quantity, lot.cost_minor) for lot in lots] == [(-2, 1_000)]
+
+
 def test_amount_and_quantity_reservations_affect_availability(connection):
     post_committed(connection, capital_draft(10_000))
     post_committed(connection, buy_draft(key="buy", quantity=100, cost_minor=1_000))

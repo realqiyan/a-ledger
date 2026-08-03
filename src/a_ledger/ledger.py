@@ -450,7 +450,37 @@ class Ledger:
     ) -> None:
         for lot_id, quantity_delta, cost_delta, reversed_event_id in overrides:
             current = self._lot_totals(lot_id)
-            if current is None or current[0] + quantity_delta < 0 or current[1] + cost_delta < 0:
+            original = self.connection.execute(
+                """SELECT event_kind FROM ledger_lot_events WHERE id=?""",
+                (reversed_event_id,),
+            ).fetchone()
+            acquisition = self.connection.execute(
+                """SELECT quantity_delta, cost_delta_minor
+                   FROM ledger_lot_events
+                   WHERE lot_id=? AND event_kind='ACQUIRE'
+                   ORDER BY rowid LIMIT 1""",
+                (lot_id,),
+            ).fetchone()
+            if current is None or original is None or acquisition is None:
+                raise LedgerError("reversal references an unavailable lot event")
+            new_quantity = current[0] + quantity_delta
+            new_cost = current[1] + cost_delta
+            acquire_quantity = int(acquisition[0])
+            acquire_cost = int(acquisition[1])
+            same_side = (
+                new_quantity == 0
+                or (new_quantity > 0) == (acquire_quantity > 0)
+            )
+            within_opening = (
+                abs(new_quantity) <= abs(acquire_quantity)
+                and 0 <= new_cost <= acquire_cost
+                and (new_quantity != 0 or new_cost == 0)
+            )
+            opening_reversal_is_clean = (
+                original[0] != LotEventKind.ACQUIRE.value
+                or (new_quantity == 0 and new_cost == 0)
+            )
+            if not same_side or not within_opening or not opening_reversal_is_clean:
                 raise LedgerError("reversal would invalidate a dependent lot consumption")
             self._insert_lot_event(
                 portfolio_id,
@@ -578,6 +608,12 @@ class Ledger:
         *,
         reversal_source_namespace: str,
         reversal_idempotency_key: str,
+        replacement_lot_allocations: Mapping[
+            int, Sequence[LotAllocation]
+        ] | None = None,
+        replacement_lot_operations: Mapping[
+            int, LotOperation | str
+        ] | None = None,
     ) -> tuple[PostResult, PostResult]:
         with self._savepoint():
             reversal = self.reverse(
@@ -588,8 +624,8 @@ class Ledger:
             )
             replaced = self._post(
                 replacement,
-                lot_allocations={},
-                lot_operations={},
+                lot_allocations=replacement_lot_allocations or {},
+                lot_operations=replacement_lot_operations or {},
                 replacement_for_transaction_id=transaction_id,
             )
             return reversal, replaced
