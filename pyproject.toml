@@ -1,22 +1,37 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "a-ledger"
-version = "0.1.0.dev0"
+version = "0.1.0rc1"
 description = "Application-neutral double-entry ledger SDK backed by SQLite"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "realqiyan" }]
+keywords = ["ledger", "accounting", "double-entry", "sqlite", "bookkeeping"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Accounting",
 ]
 
+[project.urls]
+Homepage = "https://github.com/realqiyan/a-ledger"
+Repository = "https://github.com/realqiyan/a-ledger"
+Issues = "https://github.com/realqiyan/a-ledger/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["build>=1", "pytest>=8", "twine>=5"]
+
+[tool.setuptools]
+license-files = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
