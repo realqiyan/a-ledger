@@ -76,6 +76,13 @@ Quantity postings may select a `LotOperation` per posting index:
   quantity and the final new-lot segment receives the integer remainder. `NET`
   does not accept explicit lot allocations.
 
+Advanced callers that own a compatible lot projection may pass
+`project_lots=False` to `post`, `reverse`, or `replace`. The SDK still persists
+the immutable transaction, postings, and reversal/replacement links, but writes
+no lot or lot-event rows for that operation. The caller must rebuild its lot
+projection in the same SQLite transaction before committing. The default is
+`True` and preserves the SDK-managed FIFO behavior.
+
 ## Non-goals
 
 The package does not define trading strategies, orders, options, QMT behavior,

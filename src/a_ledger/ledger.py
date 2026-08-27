@@ -138,12 +138,14 @@ class Ledger:
         *,
         lot_allocations: Mapping[int, Sequence[LotAllocation]] | None = None,
         lot_operations: Mapping[int, LotOperation | str] | None = None,
+        project_lots: bool = True,
     ) -> PostResult:
         with self._savepoint():
             return self._post(
                 draft,
                 lot_allocations=lot_allocations or {},
                 lot_operations=lot_operations or {},
+                project_lots=project_lots,
             )
 
     def _post(
@@ -155,7 +157,10 @@ class Ledger:
         reverses_transaction_id: str | None = None,
         replacement_for_transaction_id: str | None = None,
         lot_event_overrides: Mapping[int, Sequence[tuple[str, int, int, str]]] | None = None,
+        project_lots: bool = True,
     ) -> PostResult:
+        if not isinstance(project_lots, bool):
+            raise LedgerError("project_lots must be a boolean")
         self._validate_draft(draft)
         normalized_operations = {
             index: LotOperation(operation)
@@ -175,6 +180,8 @@ class Ledger:
             "reverses_transaction_id": reverses_transaction_id,
             "replacement_for_transaction_id": replacement_for_transaction_id,
         }
+        if not project_lots:
+            payload["project_lots"] = False
         payload_hash = hashlib.sha256(_json(payload).encode()).hexdigest()
         existing = self.connection.execute(
             """SELECT id, payload_hash FROM ledger_transactions
@@ -233,6 +240,8 @@ class Ledger:
                     now,
                 ),
             )
+            if not project_lots:
+                continue
             overrides = (lot_event_overrides or {}).get(index)
             if overrides is not None:
                 self._write_override_lot_events(
@@ -608,6 +617,7 @@ class Ledger:
         source_namespace: str,
         idempotency_key: str,
         business_date: str | None = None,
+        project_lots: bool = True,
     ) -> PostResult:
         with self._savepoint():
             original = self.connection.execute(
@@ -655,27 +665,29 @@ class Ledger:
                 ),
             )
             overrides: dict[int, list[tuple[str, int, int, str]]] = {}
-            for index, posting in enumerate(postings):
-                events = self.connection.execute(
-                    "SELECT * FROM ledger_lot_events WHERE posting_id=? ORDER BY rowid",
-                    (posting["id"],),
-                ).fetchall()
-                if events:
-                    overrides[index] = [
-                        (
-                            event["lot_id"],
-                            -event["quantity_delta"],
-                            -event["cost_delta_minor"],
-                            event["id"],
-                        )
-                        for event in events
-                    ]
+            if project_lots:
+                for index, posting in enumerate(postings):
+                    events = self.connection.execute(
+                        "SELECT * FROM ledger_lot_events WHERE posting_id=? ORDER BY rowid",
+                        (posting["id"],),
+                    ).fetchall()
+                    if events:
+                        overrides[index] = [
+                            (
+                                event["lot_id"],
+                                -event["quantity_delta"],
+                                -event["cost_delta_minor"],
+                                event["id"],
+                            )
+                            for event in events
+                        ]
             return self._post(
                 draft,
                 lot_allocations={},
                 lot_operations={},
                 reverses_transaction_id=transaction_id,
                 lot_event_overrides=overrides,
+                project_lots=project_lots,
             )
 
     def replace(
@@ -691,6 +703,7 @@ class Ledger:
         replacement_lot_operations: Mapping[
             int, LotOperation | str
         ] | None = None,
+        project_lots: bool = True,
     ) -> tuple[PostResult, PostResult]:
         with self._savepoint():
             reversal = self.reverse(
@@ -698,12 +711,14 @@ class Ledger:
                 source_namespace=reversal_source_namespace,
                 idempotency_key=reversal_idempotency_key,
                 business_date=replacement.business_date,
+                project_lots=project_lots,
             )
             replaced = self._post(
                 replacement,
                 lot_allocations=replacement_lot_allocations or {},
                 lot_operations=replacement_lot_operations or {},
                 replacement_for_transaction_id=transaction_id,
+                project_lots=project_lots,
             )
             return reversal, replaced
 
