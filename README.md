@@ -65,6 +65,17 @@ ledger.post(
 connection.commit()
 ```
 
+## Lot operations
+
+Quantity postings may select a `LotOperation` per posting index:
+
+- `OPEN` always acquires a new signed lot.
+- `CLOSE` consumes opposite-side lots and rejects insufficient quantity.
+- `NET` consumes opposite-side lots FIFO, then opens any remaining quantity as a
+  new same-side lot. When a posting crosses zero, its absolute amount is split by
+  quantity and the final new-lot segment receives the integer remainder. `NET`
+  does not accept explicit lot allocations.
+
 ## Non-goals
 
 The package does not define trading strategies, orders, options, QMT behavior,

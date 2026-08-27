@@ -367,6 +367,149 @@ def test_reversing_short_close_restores_the_signed_lot(connection):
     assert [(lot.quantity, lot.cost_minor) for lot in lots] == [(-2, 1_000)]
 
 
+@pytest.mark.parametrize(
+    ("opening_drafts", "net_draft", "expected_lots", "expected_events"),
+    [
+        (
+            (
+                sell_draft(key="short-1", quantity=3, proceeds_minor=900),
+                sell_draft(key="short-2", quantity=2, proceeds_minor=800),
+            ),
+            buy_draft(key="net-buy", quantity=7, cost_minor=1_000),
+            [(2, 287)],
+            [(3, -900), (2, -800), (2, 287)],
+        ),
+        (
+            (
+                buy_draft(key="long-1", quantity=3, cost_minor=900),
+                buy_draft(key="long-2", quantity=2, cost_minor=800),
+            ),
+            sell_draft(key="net-sell", quantity=7, proceeds_minor=1_000),
+            [(-2, 287)],
+            [(-3, -900), (-2, -800), (-2, 287)],
+        ),
+    ],
+)
+def test_net_consumes_fifo_then_opens_residual_with_deterministic_cost(
+    connection,
+    opening_drafts,
+    net_draft,
+    expected_lots,
+    expected_events,
+):
+    ledger = Ledger(connection)
+    begin(connection)
+    for draft in opening_drafts:
+        ledger.post(draft, lot_operations={0: LotOperation.OPEN})
+    net = ledger.post(net_draft, lot_operations={0: LotOperation.NET})
+    connection.commit()
+
+    lots = ledger.open_signed_lots("security-1", "510300.SH")
+    assert [(lot.quantity, lot.cost_minor) for lot in lots] == expected_lots
+    events = connection.execute(
+        """SELECT e.quantity_delta, e.cost_delta_minor
+           FROM ledger_lot_events e
+           JOIN ledger_postings p ON p.id = e.posting_id
+           WHERE p.transaction_id=? AND p.account_id='security-1'
+           ORDER BY e.rowid""",
+        (net.transaction_id,),
+    ).fetchall()
+    assert [tuple(event) for event in events] == expected_events
+
+
+def test_net_fully_closes_or_fully_opens_without_crossing_zero(connection):
+    ledger = Ledger(connection)
+    begin(connection)
+    ledger.post(
+        sell_draft(key="short-open", quantity=5, proceeds_minor=1_000),
+        lot_operations={0: LotOperation.OPEN},
+    )
+    ledger.post(
+        buy_draft(key="short-partial-close", quantity=2, cost_minor=600),
+        lot_operations={0: LotOperation.NET},
+    )
+    ledger.post(
+        buy_draft(key="short-final-close", quantity=3, cost_minor=900),
+        lot_operations={0: LotOperation.NET},
+    )
+    ledger.post(
+        buy_draft(key="long-open", quantity=4, cost_minor=1_200),
+        lot_operations={0: LotOperation.NET},
+    )
+    connection.commit()
+
+    lots = ledger.open_signed_lots("security-1", "510300.SH")
+    assert [(lot.quantity, lot.cost_minor) for lot in lots] == [(4, 1_200)]
+
+
+def test_net_rejects_explicit_lot_allocations(connection):
+    ledger = Ledger(connection)
+    begin(connection)
+    ledger.post(
+        sell_draft(key="short-open", quantity=2, proceeds_minor=1_000),
+        lot_operations={0: LotOperation.OPEN},
+    )
+    lot = ledger.open_signed_lots("security-1", "510300.SH")[0]
+    with pytest.raises(LedgerError, match="NET.*explicit lot allocations"):
+        ledger.post(
+            buy_draft(key="net-explicit", quantity=1, cost_minor=400),
+            lot_operations={0: LotOperation.NET},
+            lot_allocations={0: (LotAllocation(lot.id, 1),)},
+        )
+    connection.rollback()
+
+
+def test_net_is_idempotent_and_reversal_restores_consumed_and_acquired_lots(connection):
+    ledger = Ledger(connection)
+    begin(connection)
+    opened = ledger.post(
+        sell_draft(key="short-open", quantity=5, proceeds_minor=1_000),
+        lot_operations={0: LotOperation.OPEN},
+    )
+    draft = buy_draft(key="net-buy", quantity=8, cost_minor=1_600)
+    first = ledger.post(draft, lot_operations={0: LotOperation.NET})
+    second = ledger.post(draft, lot_operations={0: LotOperation.NET})
+    assert first.created is True
+    assert second.created is False
+    assert second.transaction_id == first.transaction_id
+
+    ledger.reverse(
+        first.transaction_id,
+        source_namespace="test-correction",
+        idempotency_key="reverse-net-buy",
+    )
+    connection.commit()
+
+    lots = ledger.open_signed_lots("security-1", "510300.SH")
+    assert [
+        (lot.source_transaction_id, lot.quantity, lot.cost_minor) for lot in lots
+    ] == [(opened.transaction_id, -5, 1_000)]
+
+
+def test_replace_net_reverses_original_events_before_applying_replacement(connection):
+    ledger = Ledger(connection)
+    begin(connection)
+    ledger.post(
+        sell_draft(key="short-open", quantity=5, proceeds_minor=1_000),
+        lot_operations={0: LotOperation.OPEN},
+    )
+    original = ledger.post(
+        buy_draft(key="net-buy", quantity=8, cost_minor=1_600),
+        lot_operations={0: LotOperation.NET},
+    )
+    ledger.replace(
+        original.transaction_id,
+        buy_draft(key="net-buy-replacement", quantity=6, cost_minor=1_200),
+        reversal_source_namespace="test-correction",
+        reversal_idempotency_key="reverse-net-for-replacement",
+        replacement_lot_operations={0: LotOperation.NET},
+    )
+    connection.commit()
+
+    lots = ledger.open_signed_lots("security-1", "510300.SH")
+    assert [(lot.quantity, lot.cost_minor) for lot in lots] == [(1, 200)]
+
+
 def test_amount_and_quantity_reservations_affect_availability(connection):
     post_committed(connection, capital_draft(10_000))
     post_committed(connection, buy_draft(key="buy", quantity=100, cost_minor=1_000))

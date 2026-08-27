@@ -255,6 +255,12 @@ class Ledger:
                     lot_allocations.get(index),
                     required_lot_sign=-1 if posting.quantity_delta > 0 else 1,
                 )
+            elif normalized_operations.get(index) == LotOperation.NET:
+                if index in lot_allocations:
+                    raise LedgerError("lot NET does not support explicit lot allocations")
+                if posting.quantity_delta == 0:
+                    raise LedgerError("lot NET requires a nonzero posting quantity")
+                self._net_lots(draft, posting, transaction_id, posting_id)
             elif posting.quantity_delta > 0:
                 if index in lot_allocations:
                     raise LedgerError("positive quantity postings cannot consume lot allocations")
@@ -375,6 +381,77 @@ class Ledger:
             explicit,
             required_lot_sign=1,
         )
+
+    def _net_lots(
+        self,
+        draft: TransactionDraft,
+        posting: PostingDraft,
+        transaction_id: str,
+        posting_id: str,
+    ) -> None:
+        requested = abs(posting.quantity_delta)
+        posting_sign = 1 if posting.quantity_delta > 0 else -1
+        required_lot_sign = -posting_sign
+        open_lots = [
+            lot
+            for lot in self.open_signed_lots(
+                posting.account_id, posting.instrument_code or ""
+            )
+            if (1 if lot.quantity > 0 else -1) == required_lot_sign
+        ]
+        remaining = requested
+        consumed_quantities: list[int] = []
+        for lot in open_lots:
+            consumed = min(abs(lot.quantity), remaining)
+            if consumed:
+                consumed_quantities.append(consumed)
+                remaining -= consumed
+            if remaining == 0:
+                break
+
+        consumed_total = requested - remaining
+        if consumed_total:
+            closing_posting = replace(
+                posting,
+                quantity_delta=posting_sign * consumed_total,
+            )
+            self._close_lots(
+                draft,
+                closing_posting,
+                transaction_id,
+                posting_id,
+                None,
+                required_lot_sign=required_lot_sign,
+            )
+        if remaining:
+            amount_segments = self._allocate_amount_by_quantity(
+                abs(posting.amount_minor),
+                (*consumed_quantities, remaining),
+            )
+            residual_amount = amount_segments[-1]
+            opening_posting = replace(
+                posting,
+                amount_minor=(
+                    -residual_amount if posting.amount_minor < 0 else residual_amount
+                ),
+                quantity_delta=posting_sign * remaining,
+            )
+            self._acquire_lot(draft, opening_posting, transaction_id, posting_id)
+
+    @staticmethod
+    def _allocate_amount_by_quantity(
+        amount_minor: int,
+        quantities: Sequence[int],
+    ) -> tuple[int, ...]:
+        total_quantity = sum(quantities)
+        remaining_amount = amount_minor
+        allocations: list[int] = []
+        for quantity in quantities[:-1]:
+            allocated = amount_minor * quantity // total_quantity
+            allocations.append(allocated)
+            remaining_amount -= allocated
+        allocations.append(remaining_amount)
+        return tuple(allocations)
 
     def _close_lots(
         self,

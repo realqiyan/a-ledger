@@ -36,6 +36,7 @@ class LotEventKind(str, Enum):
 class LotOperation(str, Enum):
     OPEN = "OPEN"
     CLOSE = "CLOSE"
+    NET = "NET"
 
 
 @dataclass(frozen=True, slots=True)
