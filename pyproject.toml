@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "a-ledger"
-version = "0.1.0"
+version = "0.2.0rc1"
 description = "Application-neutral double-entry ledger SDK backed by SQLite"
 readme = "README.md"
 requires-python = ">=3.11"
